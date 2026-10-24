@@ -6,7 +6,12 @@
       .\secure-check.ps1
     Audit, then harden settings:
       .\secure-check.ps1 -Harden
+    Strip telemetry, ads and preinstalled junk (safe to re-run; only changes what isn't already set):
+      .\secure-check.ps1 -Harden -Debloat
     Options:
+      -Debloat      Telemetry/ads/suggestions off, bloat apps removed. Uses only Microsoft's own
+                    documented settings - never touches activation, Windows Update, Defender,
+                    the Store, or blocks Microsoft servers (that's what breaks activation/updates).
       -FullScan     Defender full scan instead of quick scan (slow)
       -OfflineScan  Queue a Defender Offline (boot-time rootkit) scan - REBOOTS the PC
       -NoScan       Skip the Defender scan
@@ -18,6 +23,7 @@
 [CmdletBinding()]
 param(
   [switch]$Harden,
+  [switch]$Debloat,
   [switch]$FullScan,
   [switch]$OfflineScan,
   [switch]$NoScan
@@ -511,6 +517,122 @@ if ($Harden) {
   Write-Host "`n  Not automated (do by hand): Tamper Protection ON in Windows Security; uninstall any remote-access tools flagged above." -ForegroundColor Yellow
 }
 
+# ---------------------------------------------------------------- 16. debloat (idempotent)
+if ($Debloat) {
+  Section 'DEBLOAT (telemetry, ads, preinstalled junk)'
+  $script:Changed = 0; $script:Already = 0
+  function Set-RegValue([string]$Path, [string]$Name, $Value, [string]$Type = 'DWord') {
+    if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+    $cur = (Get-ItemProperty -Path $Path -Name $Name).$Name
+    if ($null -ne $cur -and "$cur" -eq "$Value") { $script:Already++; return }
+    New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force | Out-Null
+    $script:Changed++
+    Info "[+] $($Path -replace '^Registry::HKEY_USERS\\','HKU\')\$Name = $Value"
+  }
+
+  # --- machine-wide policies (documented Group Policy registry values)
+  $dc = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'
+  Set-RegValue $dc 'AllowTelemetry' 0                 # Pro treats 0 as "Required" - the lowest Microsoft supports
+  Set-RegValue $dc 'DoNotShowFeedbackNotifications' 1
+  Set-RegValue $dc 'LimitDiagnosticLogCollection' 1
+  Set-RegValue $dc 'AllowDeviceNameInTelemetry' 0
+  Set-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo' 'DisabledByGroupPolicy' 1
+  $ws = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search'
+  Set-RegValue $ws 'AllowCortana' 0
+  Set-RegValue $ws 'DisableWebSearch' 1
+  Set-RegValue $ws 'ConnectedSearchUseWeb' 0
+  $sy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
+  Set-RegValue $sy 'EnableActivityFeed' 0
+  Set-RegValue $sy 'PublishUserActivities' 0
+  Set-RegValue $sy 'UploadUserActivities' 0
+  Set-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' 'DisableWindowsConsumerFeatures' 1
+  Set-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' 'DisableSoftLanding' 1
+  Set-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds' 'EnableFeeds' 0      # taskbar News & Interests
+  Set-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' 'HideSCAMeetNow' 1
+  Set-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\InputPersonalization' 'AllowInputPersonalization' 0
+  Set-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' 'DODownloadMode' 1  # share updates on LAN only, not the internet
+
+  # --- per-user settings: you, plus the Default profile so new accounts (kids) start clean
+  $userRoots = @('HKCU:')
+  $defLoaded = $false
+  if (-not (Test-Path 'Registry::HKEY_USERS\SC_Default')) {
+    reg load 'HKU\SC_Default' "$env:SystemDrive\Users\Default\NTUSER.DAT" 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { $defLoaded = $true }
+  }
+  if (Test-Path 'Registry::HKEY_USERS\SC_Default') { $userRoots += 'Registry::HKEY_USERS\SC_Default' }
+  foreach ($u in $userRoots) {
+    $cdm = "$u\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+    foreach ($n in 'ContentDeliveryAllowed','OemPreInstalledAppsEnabled','PreInstalledAppsEnabled','PreInstalledAppsEverEnabled',
+                   'SilentInstalledAppsEnabled','SoftLandingEnabled','SystemPaneSuggestionsEnabled','RotatingLockScreenOverlayEnabled',
+                   'SubscribedContent-310093Enabled','SubscribedContent-338387Enabled','SubscribedContent-338388Enabled',
+                   'SubscribedContent-338389Enabled','SubscribedContent-338393Enabled','SubscribedContent-353694Enabled',
+                   'SubscribedContent-353696Enabled','SubscribedContent-353698Enabled') { Set-RegValue $cdm $n 0 }
+    Set-RegValue "$u\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" 'Enabled' 0
+    Set-RegValue "$u\Software\Microsoft\Windows\CurrentVersion\Privacy" 'TailoredExperiencesWithDiagnosticDataEnabled' 0
+    Set-RegValue "$u\Software\Policies\Microsoft\Windows\CloudContent" 'DisableTailoredExperiencesWithDiagnosticData' 1
+    Set-RegValue "$u\Software\Microsoft\Windows\CurrentVersion\Search" 'BingSearchEnabled' 0
+    Set-RegValue "$u\Software\Microsoft\Windows\CurrentVersion\Search" 'CortanaConsent' 0
+    Set-RegValue "$u\Software\Policies\Microsoft\Windows\Explorer" 'DisableSearchBoxSuggestions' 1
+    Set-RegValue "$u\Software\Microsoft\Siuf\Rules" 'NumberOfSIUFInPeriod' 0
+    Set-RegValue "$u\Software\Microsoft\InputPersonalization" 'RestrictImplicitTextCollection' 1
+    Set-RegValue "$u\Software\Microsoft\InputPersonalization" 'RestrictImplicitInkCollection' 1
+    Set-RegValue "$u\Software\Microsoft\InputPersonalization\TrainedDataStore" 'HarvestContacts' 0
+    Set-RegValue "$u\Software\Microsoft\Personalization\Settings" 'AcceptedPrivacyPolicy' 0
+    Set-RegValue "$u\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" 'Start_TrackProgs' 0
+    Set-RegValue "$u\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" 'ShowSyncProviderNotifications' 0
+    Set-RegValue "$u\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" 'ScoobeSystemSettingEnabled' 0   # "finish setting up your device" nags
+  }
+  if ($defLoaded) { [gc]::Collect(); [gc]::WaitForPendingFinalizers(); reg unload 'HKU\SC_Default' 2>$null | Out-Null }
+
+  # --- telemetry services
+  foreach ($n in 'DiagTrack','dmwappushservice') {
+    $s = Get-Service $n
+    if ($s -and $s.StartType -ne 'Disabled') {
+      Stop-Service $n -Force; Set-Service $n -StartupType Disabled
+      $script:Changed++; Info "[+] Service $n disabled"
+    } elseif ($s) { $script:Already++ }
+  }
+
+  # --- telemetry scheduled tasks
+  $teleTasks = '\Microsoft\Windows\Customer Experience Improvement Program\Consolidator',
+               '\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip',
+               '\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser',
+               '\Microsoft\Windows\Application Experience\ProgramDataUpdater',
+               '\Microsoft\Windows\Autochk\Proxy',
+               '\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector',
+               '\Microsoft\Windows\Feedback\Siuf\DmClient',
+               '\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload'
+  foreach ($full in $teleTasks) {
+    $leaf = $full.Split('\')[-1]
+    $tp   = $full.Substring(0, $full.Length - $leaf.Length)
+    $t = Get-ScheduledTask -TaskPath $tp -TaskName $leaf
+    if ($t -and $t.State -ne 'Disabled') { $t | Disable-ScheduledTask | Out-Null; $script:Changed++; Info "[+] Task disabled: $full" }
+    elseif ($t) { $script:Already++ }
+  }
+
+  # --- preinstalled junk apps (keeps Store, Xbox/Game Bar, Photos, Calculator, media players, Edge)
+  $bloat = 'Microsoft.BingNews','Microsoft.BingWeather','Microsoft.GetHelp','Microsoft.Getstarted',
+           'Microsoft.Microsoft3DViewer','Microsoft.MicrosoftOfficeHub','Microsoft.MicrosoftSolitaireCollection',
+           'Microsoft.MixedReality.Portal','Microsoft.Office.OneNote','Microsoft.OneConnect','Microsoft.People',
+           'Microsoft.Print3D','Microsoft.SkypeApp','Microsoft.Wallet','Microsoft.WindowsFeedbackHub',
+           'Microsoft.WindowsMaps','Microsoft.Messaging','Microsoft.YourPhone','Microsoft.549981C3F5F10',
+           'Microsoft.Todos','Microsoft.PowerAutomateDesktop','MicrosoftTeams','Clipchamp.Clipchamp',
+           '*king.com*','*CandyCrush*','*BubbleWitch*','*Spotify*','*Disney*','*TikTok*','*Facebook*',
+           '*Twitter*','*Netflix*','*Hulu*','*Dolby*','*HiddenCity*','*MarchofEmpires*','*FarmVille*','*Duolingo*'
+  foreach ($b in $bloat) {
+    foreach ($p in @(Get-AppxPackage -AllUsers -Name $b)) {
+      if ($p) { Remove-AppxPackage -Package $p.PackageFullName -AllUsers; $script:Changed++; Info "[+] Removed app: $($p.Name)" }
+    }
+    foreach ($p in @(Get-AppxProvisionedPackage -Online | Where-Object DisplayName -like $b)) {
+      if ($p) { Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName | Out-Null; $script:Changed++; Info "[+] Unprovisioned: $($p.DisplayName)" }
+    }
+  }
+
+  Write-Host ("  Debloat: {0} changed, {1} already set." -f $script:Changed, $script:Already) -ForegroundColor Green
+  Write-Host '  Left alone on purpose: activation, Windows Update, Defender + SmartScreen, Store, Xbox, Edge, OneDrive.' -ForegroundColor DarkGray
+  Write-Host '  Big updates can re-enable some of this - just re-run with -Debloat.' -ForegroundColor DarkGray
+}
+
 # ---------------------------------------------------------------- summary
 Section 'SUMMARY'
 $Flags | Export-Csv (Join-Path $ReportDir 'findings.csv') -NoTypeInformation
@@ -528,7 +650,7 @@ if ($hi -gt 0) {
   Write-Host "`n  Clean on every check this script runs." -ForegroundColor Green
 }
 Write-Host "  Full report: $ReportDir"
-if ($Harden) { Write-Host '  Reboot to finish (LSASS protection, SMBv1 removal).' -ForegroundColor Yellow }
+if ($Harden -or $Debloat) { Write-Host '  Reboot to finish applying changes.' -ForegroundColor Yellow }
 
 Stop-Transcript | Out-Null
 
