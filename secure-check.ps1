@@ -250,7 +250,9 @@ foreach ($t in (Get-ScheduledTask | Where-Object State -ne 'Disabled')) {
     $cmd = ("$($a.Execute) $($a.Arguments)").Trim()
     $taskRows += [pscustomobject]@{ Task = "$($t.TaskPath)$($t.TaskName)"; Command = $cmd }
     if ($isMs) {
-      if ($cmd -match $SusCmd -or (Get-ExePath $cmd) -match $UserWritable) { Flag 'HIGH' 'SchedTask' "Suspicious task hiding under \Microsoft: $($t.TaskPath)$($t.TaskName) -> $cmd" }
+      $tExe = Get-ExePath $cmd
+      $tSig = Get-Sig $tExe
+      if ($cmd -match $SusCmd -or ($tExe -match $UserWritable -and $tSig -notmatch '^Valid:.*Microsoft')) { Flag 'HIGH' 'SchedTask' "Suspicious task hiding under \Microsoft: $($t.TaskPath)$($t.TaskName) -> $cmd [$tSig]" }
     } else {
       Info "$($t.TaskPath)$($t.TaskName) -> $cmd"
       Judge 'SchedTask' "$($t.TaskPath)$($t.TaskName)" $cmd
