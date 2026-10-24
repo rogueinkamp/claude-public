@@ -417,8 +417,9 @@ $scanRoots = @("$env:SystemRoot\Temp", "$env:PUBLIC", "$env:ProgramData") + (Get
 $skip = '(?i)\\(Microsoft\\Windows Defender|Package Cache|WindowsApps|Microsoft\\Windows\\WER|Microsoft\\Edge|Microsoft\\EdgeUpdate|Microsoft\\OneDrive)\\'
 $found = 0
 foreach ($root in $scanRoots) {
-  Get-ChildItem -LiteralPath $root -Recurse -Force -File -Include *.exe,*.dll,*.scr,*.com,*.ps1,*.vbs,*.vbe,*.js,*.jse,*.hta,*.bat,*.cmd |
-    Where-Object { $_.FullName -notmatch $skip -and $_.Length -gt 0 } | ForEach-Object {
+  Get-ChildItem -LiteralPath $root -Recurse -Force -File |
+    Where-Object { $_.Extension -match '(?i)^\.(exe|dll|scr|com|ps1|vbs|vbe|js|jse|hta|bat|cmd)$' -and
+                   $_.FullName -notmatch $skip -and $_.FullName -notmatch '\\SecurityAudit_\d' -and $_.Length -gt 0 } | ForEach-Object {
       if ($found -ge 60) { return }
       if ($_.Extension -match '(?i)\.(exe|dll|scr|com)$') {
         $sig = Get-Sig $_.FullName
